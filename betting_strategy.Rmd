@@ -1,0 +1,225 @@
+---
+title: "Over/Under Betting Strategy"
+author: "by [Benjamin DAVID]()"
+mail: benjamin7david@gmail.com
+output:
+  epuRate::epurate:
+    code_folding: show
+    number_sections: no
+    toc: yes
+  html_document:
+    df_print: paged
+    toc: yes
+logo: logo_gallery.png
+---
+
+<style>
+#TOC {
+  top: 1%;
+  opacity: 0.5;
+}
+#TOC:hover {
+  opacity: 1;
+}
+</style>
+
+
+> Challenge presentation : The main goal is to formulate an over/under betting strategy based on the data. To do so, we will predict the profit using a machine learning approach. We will use these predictions 
+
+> **METHODOLOGY** ------- 
+<br><br>
+1. Identify the type of problem : supervised learning or unsupervised learning ? regression or classification ? Define a error metric to compare models.
+<br> The challenge is a **regression problem** and the **Mean Absolute Error (MAE)** will be the metric to evaluate the performance.
+<br><br>
+2. **Data understanding** - missing values, variable types (One hot encoding : Many models require all variables to be numeric) - Handle missing values if necessary (delete rows or mean/median imputations).
+<br><br>
+3. **Descriptives statistics** - response variable distribution. Main statistics (min, max, mean, quantiles, standard deviation, mode (for categorical variables)) for each feature.
+<br><br>
+4. **Correlation analysis** between response variable and other numeric variables (or categorical variables after one hot encoding)
+<br><br>
+5. **Data Splitting** : training set (used to train algorithms and tune hyper-parameters) and testing set (used to estimate its prediction error (generalization error)). Data from test set won't be used during model training.
+<br><br>
+6. **Cross validation** on the training set in order to define the best strategy.
+<br> Comparison of different algorithms (OLS, Ridge, Lasso, ... Random Forest, XGBoost) by tuning the hyper-parameters in the cross validation.
+<br><br>
+7. **Identify the best strategy** by analyzing the cross validation errors for each model. 
+<br> This step enables us to see if there are non linear effects. In such a case, we can try models with interaction terms.
+<br> Interaction models increase a lot the number of features (Beware of the curse of dimensionality!).
+<br><br>
+8. We can perform **Principal Components Analysis** (PCA) to reduce the dimensionality of the data set with interaction terms (to reduce the number of variables and avoid multicollinearity).
+<br><br>
+9. **Retrain** the best model (i.e model with optimal hyper-parameters from cross validation) **on the full training set** & **assess performance on the testing set**.
+<br> In the following code, we'll tune some hyper-parameters in the cross validation but without seeking for the optimal combination (grid search) for lack of time.
+
+
+***
+**LOAD PACKAGES**
+
+```{r setup, message = FALSE, warning = FALSE, echo = TRUE, eval = FALSE}
+
+# Disable scientific notation 
+options(scipen=999)
+
+# Load useful packages ----
+
+# Data manipulation
+library(tidyverse)
+library(data.table)
+library(broom)
+library(readr)
+
+# String manipulation
+library(stringr)
+
+# Resample data 
+library(rsample)
+library(recipes)
+
+# Correlation Analysis 
+library(correlationfunnel)
+
+# Machine learning
+library(caret)
+library(mlr)
+library(glmnet)
+library(gbm)
+library(xgboost)
+library(e1071)
+library(neuralnet)
+library(kernlab)
+library(rpart)
+library(ranger)
+library(randomForest)
+library(splines)
+
+# Graphics 
+library(ggplot2)
+library(plotly)
+
+# Data Cleaning
+library(janitor)
+
+# EDA 
+library(skimr)
+
+# Apply mapping functions 
+library(purrr)
+library(furrr) # in parallel 
+
+# Rmarkdown 
+library(epuRate)
+library(rmarkdown)
+library(knitr)
+library(formattable)
+library(kableExtra)
+
+# TIming R scripts
+library(tictoc)
+
+```
+
+
+***
+# DATA EXPLORATION
+```{r, message = FALSE, warning = FALSE, echo = TRUE, eval = FALSE}
+# # Exploring data 
+# summarize_train <- mlr::summarizeColumns(train)
+# summarize_test <- mlr::summarizeColumns(test)
+
+# there are some algorithms which don’t require you to impute missing values
+# You can simply supply them missing data. They take care of missing values on their own
+# Let’s see which algorithms are they
+# listLearners("regr", check.packages = TRUE, properties = "missings")[c("class","package")]
+
+# To get the list of parameters for any algorithm
+# getParamSet("regr.cvglmnet")
+
+# Import data from Github 
+
+link_github <- "https://raw.githubusercontent.com/benj7/betting_strategy/master/football_example.csv"
+
+df <- fread(link_github)
+# 38,810 rows and 22 variables 
+
+# back up data initial 
+df_backup <- df
+
+# Response variable renaming  
+df <- df %>% rename(Y = profit)
+
+```
+
+## Descriptive Statistics 
+
+```{r, message = FALSE, warning = FALSE, echo = TRUE, eval = FALSE}
+
+# Descriptive stats 
+tmp <- skim(df)
+
+```
+
+> The mean of the profit is negative `r skim(df) %>% filter(skim_variable == "Y") %>% select(numeric.mean)`
+
+
+
+# DESCRIPTIVE STATISTICS  
+
+```{r, message = FALSE, warning = FALSE, echo = TRUE, eval = TRUE}
+
+# Correlation Analysis
+
+df_binarized <- df %>%
+  # remove useless variables with no information or variables that we don't know before betting 
+  select(-c(market_id, 
+            match_start_time_gmt, 
+            league_id, 
+            home, 
+            away,
+            home_score,
+            observations,
+            away_score, 
+            final_home_score,
+            final_away_score,
+            minute,
+            nb_goals)) %>%
+  binarize(n_bins = 5, thresh_infreq = 0.01, name_infreq = "OTHER", one_hot = TRUE)
+
+df_binarized_corrl <- df_binarized %>%
+  correlate(positive_profit__1)
+
+df_binarized_corrl %>%
+  plot_correlation_funnel()
+
+# feature Engineering ----
+
+df <- df %>% 
+  
+  mutate(elo_diff_ft = elo_home_ft - elo_away_ft,
+         
+         elo_diff_fh = elo_home_fh - elo_away_fh,
+         
+         diff_probs = league_prob_at_least - 1/(odds+1),
+         
+         nb_goals = final_home_score + final_away_score,
+         
+         positive_profit = if_else(profit > 0, 1, 0),
+         
+         selection = case_when(selection == "home" ~ "over",
+                               selection == "away" ~ "under"),
+         
+         profit_odd_ratio = profit/odds)
+
+
+df <- as.data.table(df)
+
+df <- df[profit < 0, profit_odd_ratio := profit]
+
+df$profit_odd_ratio <- round(df$profit_odd_ratio, 2)
+
+# Remove useless variables (without any useful information for modelling)
+df <- as.data.table(df)
+variables_a_garder <- setdiff(names(df),c("ID", "MAC_CODE"))
+df <- df[, .SD, .SDcols = variables_a_garder]
+
+```
+

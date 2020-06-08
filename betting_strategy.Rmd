@@ -15,11 +15,11 @@ logo: logo_gallery.png
 
 <style>
 #TOC {
-  top: 1%;
-  opacity: 0.5;
+top: 1%;
+opacity: 0.5;
 }
 #TOC:hover {
-  opacity: 1;
+opacity: 1;
 }
 </style>
 
@@ -144,29 +144,81 @@ df <- fread(link_github)
 # back up data initial 
 df_backup <- df
 
-# Response variable renaming  
-df <- df %>% rename(Y = profit)
+# Rename modalities of the variable selection 
+df <- df %>% mutate(selection = case_when(selection == "home" ~ "over",
+                                          selection == "away" ~ "under"))
 
 ```
 
-## Descriptive Statistics 
+## Descriptive Statistics
 
 ```{r, message = FALSE, warning = FALSE, echo = TRUE, eval = FALSE}
 
 # Descriptive stats 
-tmp <- skim(df)
+skim(df)
 
 ```
 
-> The mean of the profit is negative `r skim(df) %>% filter(skim_variable == "Y") %>% select(numeric.mean)`
+> The mean of the profit is negative: -0.0443.
+
+> The variable "home_score" and "away_score" which are the score at the 15th minute for home and away teams are always equal to O. This variable is not reliable enough to be used for modelling. 
 
 
+## Response Variable Distribution
+```{r, message = FALSE, warning = FALSE, echo = TRUE, eval = FALSE}
 
-# DESCRIPTIVE STATISTICS  
+plot_ly(data = df, 
+        x = ~profit,
+        type = "histogram",
+        histnorm = "probability") %>%  
+  layout(title = "Frequency distribution of Profit",
+         xaxis = list(title = "Profit",
+                      zeroline = FALSE),
+         yaxis = list(title = "Frequency",
+                      zeroline = FALSE))
+
+# The response variable is skewed - we can't consider log transformation since the target could be negative 
+
+```
+
+> Around 54% of the bets have a profit negative or equals to 0. 
+
+# EXPLORATORY DATA ANALYSIS 
+
+> Which features are most likely to provide business insights and lend well to a machine learning model?
 
 ```{r, message = FALSE, warning = FALSE, echo = TRUE, eval = TRUE}
 
-# Correlation Analysis
+# Feature Engineering ----
+
+df <- df %>% 
+  
+  mutate(# Add difference between elo_home and elo_away
+    elo_diff_ft = elo_home_ft - elo_away_ft,
+    
+    elo_diff_fh = elo_home_fh - elo_away_fh,
+    
+    # Add difference between league_prod_at_least and implied probability from odds 
+    diff_probs = league_prob_at_least - 1/(odds+1),
+    
+    # Total number of goals
+    nb_goals = final_home_score + final_away_score,
+    
+    # Is profit positive? 1: Yes - 0:No
+    positive_profit = if_else(profit > 0, 1, 0),
+    
+    # Ratio between profit and odds 
+    profit_odd_ratio = profit/odds)
+
+df <- as.data.table(df)
+
+df <- df[profit < 0, profit_odd_ratio := profit]
+
+df$profit_odd_ratio <- round(df$profit_odd_ratio, 2)
+
+# Correlation Analysis - Identify key features that relate to the target ("profit")
+
+# Transform the data into a binary format 
 
 df_binarized <- df %>%
   # remove useless variables with no information or variables that we don't know before betting 
@@ -176,50 +228,532 @@ df_binarized <- df %>%
             home, 
             away,
             home_score,
-            observations,
             away_score, 
+            observations,
+            minute,
             final_home_score,
             final_away_score,
             minute,
-            nb_goals)) %>%
+            nb_goals,
+            profit,
+            profit_odd_ratio)) %>%
   binarize(n_bins = 5, thresh_infreq = 0.01, name_infreq = "OTHER", one_hot = TRUE)
+
+# Perform correlation analysis 
 
 df_binarized_corrl <- df_binarized %>%
   correlate(positive_profit__1)
 
+# Visualize the feature-target relationships
+
 df_binarized_corrl %>%
   plot_correlation_funnel()
 
-# feature Engineering ----
-
-df <- df %>% 
-  
-  mutate(elo_diff_ft = elo_home_ft - elo_away_ft,
-         
-         elo_diff_fh = elo_home_fh - elo_away_fh,
-         
-         diff_probs = league_prob_at_least - 1/(odds+1),
-         
-         nb_goals = final_home_score + final_away_score,
-         
-         positive_profit = if_else(profit > 0, 1, 0),
-         
-         selection = case_when(selection == "home" ~ "over",
-                               selection == "away" ~ "under"),
-         
-         profit_odd_ratio = profit/odds)
-
-
-df <- as.data.table(df)
-
-df <- df[profit < 0, profit_odd_ratio := profit]
-
-df$profit_odd_ratio <- round(df$profit_odd_ratio, 2)
-
 # Remove useless variables (without any useful information for modelling)
 df <- as.data.table(df)
-variables_a_garder <- setdiff(names(df),c("ID", "MAC_CODE"))
-df <- df[, .SD, .SDcols = variables_a_garder]
+
+features_to_keep <- setdiff(names(df),c("market_id",
+                                        "match_start_time_gmt",
+                                        "league_id", 
+                                        "home", 
+                                        "away",
+                                        "home_score",
+                                        "away_score", 
+                                        "observations",
+                                        "minute",
+                                        "final_home_score",
+                                        "final_away_score",
+                                        "minute",
+                                        "nb_goals",
+                                        "positive_profit",
+                                        "profit_odd_ratio"))
+
+df_model <- df[, .SD, .SDcols = features_to_keep]
+
+# one-hot encode our categorical variables
+one_hot <- dummyVars(~ ., df_model, fullRank = FALSE)
+df_model_hot <- predict(one_hot, df_model) %>% as.data.frame()
+
+```
+
+***
+# MODELING
+## Data Splitting 
+
+```{r, message = FALSE, warning = FALSE, echo = TRUE, eval = FALSE}
+
+# Response variable renaming  
+df_model_hot <- df_model_hot %>%
+  rename(Y = profit)
+
+# Separate into random training and test data sets ----
+
+# set.seed() for reproducibility 
+set.seed(42) 
+
+# We keep 80% of the data for model training 
+split_strat<- initial_split(df_model_hot, prop = 0.8)
+df_train  <- training(split_strat)
+df_test   <- testing(split_strat)
+
+# Split on backup data 
+set.seed(42)
+split_strat_backup <- initial_split(df_backup, prop = 0.8)
+df_train_backup  <- training(split_strat_backup)
+df_test_backup   <- testing(split_strat_backup)
+
+# df_model_hot <- as.data.table(df_model_hot)
+# indices1 <- 1:floor(nrow(df_model_hot)*0.8)
+# indices2 <- (floor(nrow(df_model_hot)*0.8)+1):nrow(df_model_hot)
+# df_train <- df_model_hot[indices1]
+# df_test <- df_model_hot[indices2]
+```
+
+## 5-fold Cross validation implementation on the training set
+```{r, message = FALSE, warning = FALSE, echo = TRUE, eval = FALSE}
+# Training set 
+X <- as.data.table(df_train %>% select(-Y))
+Y <- df_train$Y
+
+XY <- cbind(Y,X)
+names(XY)[1] <- "Y"
+
+# Testing set 
+X_test <- as.data.table(df_test %>% select(-Y))
+Y_test <- df_test$Y
+
+XY_test <- cbind(Y_test, X_test)
+names(XY_test)[1] <- "Y"
+
+# Cross validation 
+# Higher CV metrics determine that our model does not suffer from high variance and generalizes well on unseen data
+
+# We implement a 5-fold cross validation manually(for loop)
+# This gives us a lot of flexibility & provides a good understanding of what goes on behind the scenes.
+# For large-scale machine learning projects, I use H2O which automates the cross validation and hyperparameter tuning process. It's much faster and more scalable since H2O is written in Java. 
+
+# Number of folds
+N <- 5
+
+# Folds building
+set.seed(42)
+Folds <- sample(1:dim(XY)[1] %% N + 1)
+
+Output <- list()
+Time <- list()
+
+i <- 1
+
+# for loop to perform cross validation 
+for(i in 1:N){
+  Predictions <- list()
+  
+  # Estimation samples
+  XE <- X[Folds != i]
+  YE <- Y[Folds != i]
+  # Data needs to be in a matrix format for some models 
+  XME <- as.matrix(XE)
+  YME <- as.matrix(YE)
+  XYE <- XY[Folds != i]
+  
+  # Prediction samples 
+  XP <- X[Folds == i]
+  YP <- Y[Folds == i]
+  # Data needs to be in a matrix format for some models 
+  XMP <- as.matrix(XP)
+  YMP <- as.matrix(YP)
+  XYP <- XY[Folds == i]
+  
+  print(stringr::str_c("Fold number ", i))
+  print("**************************************************")
+  
+  # Add the Y variable to the prediction dataset (for comparison purpose)
+  Predictions[["Y"]] <- YP
+  Predictions[["Y"]] <- as.numeric(Predictions[["Y"]])
+  
+  #********************* ORDINARY LEAST SQUARES **********************#
+  
+  print(Nom <- "OLS (LM)")
+  Start <- proc.time()
+  Model <- stats::lm(formula = Y ~ ., data = XYE)
+  Response <- predict(Model, newdata = XP, type = "response")
+  Predictions[[Nom]] <- as.numeric(Response)
+  Time[[Nom]] <- ifelse(is.null(Time[[Nom]]), 0, Time[[Nom]]) + (proc.time() - Start)[3]
+  
+  #********************* REGULARIZED REGRESSIONS *********************#
+  
+  print(Nom <- "OLS (GLMNET)")
+  Start <- proc.time()
+  Model <- glmnet::glmnet(x = XME, y = YME, lambda = 0, alpha = 0, family = "gaussian")
+  Response <- predict(Model, newx = XMP, type = "response")
+  Predictions[[Nom]] <- as.numeric(Response)
+  Time[[Nom]] <- ifelse(is.null(Time[[Nom]]), 0, Time[[Nom]]) + (proc.time() - Start)[3]
+  
+  print(Nom <- "Ridge (GLMNET)")
+  Start <- proc.time()
+  Model <- glmnet::cv.glmnet(x = XME, y = YME, alpha = 0, family = "gaussian")
+  Response <- predict(Model, s = "lambda.min", newx = XMP, type = "response")
+  Predictions[[Nom]] <- as.numeric(Response)
+  Time[[Nom]] <- ifelse(is.null(Time[[Nom]]), 0, Time[[Nom]]) + (proc.time() - Start)[3]
+  
+  # Regularized Regression to reduce the model variance 
+  # alpha = 1 for lasso (push some coefficients to 0 for some variables), alpha = 0 for ridge (no coefficients at 0)
+  
+  # Recall that λ is a tuning parameter that helps to control our model from over-fitting to the training data
+  # However, to identify the optimal λ value we need to perform cross-validation (CV)
+  # cv.glmnet provides a built-in option to perform k-fold CV, and by default, performs 10-fold CV
+  
+  # the 10-fold CV mean squared error (MSE) across the λ values
+  
+  # number of the top = number of variables 
+  # The first vertical dashed lines represent the λ value with the minimum MSE 
+  # and the second one the largest λ value within one standard error of the minimum MSE
+  
+  # min(Model$cvm)       # minimum MSE
+  # Model$lambda.min     # lambda for this min MSE
+  
+  # Model$cvm[Model$lambda == Model$lambda.1se]  # 1 st.error of min MSE
+  
+  #  Model$lambda.1se  # lambda for this MSE
+  
+  # Influential variables 
+  
+  # coef(Model, s = "lambda.1se") %>%
+  #   tidy() %>%
+  #   filter(row != "(Intercept)") %>%
+  #   ggplot(aes(value, reorder(row, value), color = value > 0)) +
+  #   geom_point(show.legend = FALSE) +
+  #   ggtitle("Influential variables") +
+  #   xlab("Coefficient") +
+  #   ylab(NULL)
+  
+  print(Nom <- "Lasso (GLMNET)")
+  Start <- proc.time()
+  Model <- glmnet::cv.glmnet(x = XME, y = YME, alpha = 1, family = "gaussian")
+  Response <- predict(Model, s = "lambda.1se", newx = XMP, type = "response")
+  Predictions[[Nom]] <- as.numeric(Response)
+  Time[[Nom]] <- ifelse(is.null(Time[[Nom]]), 0, Time[[Nom]]) + (proc.time() - Start)[3]
+  
+  # coef(Model, s=Model$lambda.1se)
+  
+  Alphas <- c(0.25, 0.5, 0.75)
+  
+  for(Alpha in Alphas){
+    print(Nom <- stringr::str_c("Elastic net (GLMNET|alpha=", Alpha, ")"))
+    Start <- proc.time()
+    Model <- glmnet::cv.glmnet(x = XME, y = YME, alpha = Alpha, family = "gaussian")
+    Response <- predict(Model, s = "lambda.min", newx = XMP, type = "response")
+    Predictions[[Nom]] <- as.numeric(Response)
+    Time[[Nom]] <- ifelse(is.null(Time[[Nom]]), 0, Time[[Nom]]) + (proc.time() - Start)[3]
+  }
+  
+  #********************* TREE *******************************#
+  
+  print(Nom <- "Tree (RPART)")
+  Start <- proc.time()
+  Model <- rpart::rpart(formula = Y ~ ., data = XYE)
+  Response <- predict(Model, newdata = XP, type = "vector")
+  Predictions[[Nom]] <- as.numeric(Response)
+  Time[[Nom]] <- ifelse(is.null(Time[[Nom]]), 0, Time[[Nom]]) + (proc.time() - Start)[3]
+  
+  # rpart.plot(Model)
+  
+  #********************* RANDOM FORESTS *********************#
+  # tune the number of tree hyperparameter in the cross validation 
+  Numbers_Of_Trees <- c( 100, 250, 500)
+  
+  # make ranger compatible names
+  names(XYE) <- make.names(names(XYE), allow = FALSE)
+  names(XP) <- make.names(names(XP), allow = FALSE)
+  
+  for (ntree in Numbers_Of_Trees) {
+    
+    print(Nom <- stringr::str_c("Random forest (RANDOMFOREST|ntree=", ntree, ")"))
+    Start <- proc.time()
+    features <- setdiff(names(XYE), "Y")
+    Model <- ranger(formula    = Y ~ .,
+                    data       = XYE,
+                    num.trees  = ntree, # number of trees 
+                    mtry       = floor(length(features) / 3), # the number of variables to randomly sample as candidates at each split - usal value for regression = p/3 with p the total number of variables  
+                    respect.unordered.factors = 'order',
+                    verbose    = FALSE,
+                    seed       = 123
+    )
+    Response <- predict(Model, data = XP, type = "response")
+    Response <- Response$predictions
+    Predictions[[Nom]] <- as.numeric(Response)
+    Time[[Nom]] <- ifelse(is.null(Time[[Nom]]), 0, Time[[Nom]]) + (proc.time() - Start)[3]
+  }
+  
+  #********************* BOOSTING *************************#
+  
+  # Xgboost - apprx 10x faster than gbm
+  # For boosting tree models, the most important parameter is the number of trees to build - nrounds parameter
+  # XGBoost only works with matrices that contain all numeric variables
+  
+  # tune the number of tree hyperparameter in the cross validation 
+  Numbers_Of_Trees <-  c(100, 250, 500)
+  
+  for (nrounds in Numbers_Of_Trees){
+    print(Nom <- stringr::str_c("XGBoost|n.trees=", nrounds))
+    Model <- xgboost(data = XME, 
+                     label = YME,
+                     nrounds = nrounds,
+                     eta = 0.1, # learning rate 0.3 by default
+                     max_depth = 4, #  Maximum depth of a tree. 6 by default
+                     objective = "reg:linear",
+                     print_every = 10)
+    Response <- predict(Model , XMP, missing = NA)
+    Predictions[[Nom]] <- as.numeric(Response)
+    Time[[Nom]] <- ifelse(is.null(Time[[Nom]]), 0, Time[[Nom]]) + (proc.time() - Start)[3]
+  }
+  
+  # #********************* SVM *****************************#
+  # tune Kernel and Cost hyper-parameters in the cross validation 
+  # Kernels <- c("linear", "polynomial", "radial")
+  # Costs <- c(0.1, 1, 2)
+  # 
+  # for(Kernel in Kernels)
+  # {
+  #   for(Cost in Costs)
+  #   {
+  #     print(Nom <- stringr::str_c("SVM (e1071|kernel=", Kernel, "|cost=", Cost, ")"))
+  #     Start <- proc.time()
+  #     Model <- e1071::svm(Y ~ ., data = XYE, kernel = Kernel, cost = Cost)
+  #     Response <- predict(Model, newdata = XP, type = "response")
+  #     Predictions[[Nom]] <- as.numeric(Response)
+  #     Time[[Nom]] <- ifelse(is.null(Time[[Nom]]), 0, Time[[Nom]]) + (proc.time() - Start)[3]
+  #   }
+  # }
+  
+  Output[[1 + length(Output)]] <- as.data.table(do.call(cbind, Predictions))
+  
+  print("**************************************************")
+}
+```
+
+
+## Assess cross validation errors 
+```{r, message = FALSE, warning = FALSE, echo = TRUE, eval = FALSE}
+# Stack all the outputs tables up 
+
+Output <- data.table::rbindlist(l = Output, use.names = TRUE, fill = TRUE)
+
+# Measure execution time 
+Time <- data.table(Model = names(Time), Time = unlist(Time))
+
+# Function to define the error metric : Mean Absolute Error 
+loss_function <- function(X,Y){
+  mean(abs(X-Y))
+}
+
+# Assess cross validation errors for each model 
+Errors <- apply(X = Output, MARGIN = 2, FUN = loss_function, Y = Output$Y)
+Errors <- data.table(Model = names(Errors), error_rate = Errors)
+Errors <- merge(x = Errors, y = Time, by = "Model", all.x = TRUE, all.y = FALSE)
+Errors <- Errors[order(error_rate)]
+Errors
+
+# XGBoost and RandomForest models performing better than the OLS model.
+```
+
+# PREDICT ON TEST SET   
+## Retrain on the full training set 
+```{r, message = FALSE, warning = FALSE, echo = TRUE, eval = FALSE}
+# Training set 
+X <- as.data.table(df_train %>% select(-Y))
+Y <- df_train$Y
+
+XY <- cbind(Y,X)
+names(XY)[1] <- "Y"
+
+# Testing set 
+X_test <- as.data.table(df_test %>% select(-Y))
+Y_test <- df_test$Y
+
+XY_test <- cbind(Y_test, X_test)
+names(XY_test)[1] <- "Y"
+
+# Retrain on the full training set so without cross validation this time
+# According to the cross validation, the best model is Random Forest with 500 trees
+
+names(XY) <- make.names(names(XY), allow = FALSE)
+names(X_test) <- make.names(names(X_test), allow = FALSE)
+features <- setdiff(names(XY), "Y")
+
+# Fit sur l'ensemble de la base train 
+Model_final<- ranger(formula    = Y ~ .,
+                     data       = XY,
+                     num.trees  = 500, # nombre d'arbres 
+                     mtry       = floor(length(features) / 3), # nombre de variables tirés au hasard - valeur usuelle pour regression = p/3 avec p nombre de variables 
+                     respect.unordered.factors = 'order',
+                     # To plot variable imortance 
+                     importance = "impurity",
+                     # We want to access the quantile regressions forest to assess prediction intervals
+                     quantreg   = TRUE,
+                     verbose    = FALSE,
+                     seed       = 42)
+
+```
+
+## Assess performance on the test set
+```{r, message = FALSE, warning = FALSE, echo = TRUE, eval = FALSE}
+
+# Predict on the test set
+predictions_testRF <- predict(Model_final, data = X_test, type = "response")
+predictions_test <- data.frame(cbind(Y_test, predictions_testRF$predictions))
+
+# Performance on the test set
+loss_function(X = predictions_testRF$predictions, Y = Y_test)
+
+```
+> The mean Absolute Error equals to 0.55 on the test set 
+
+## Variable Importance
+```{r, message = FALSE, warning = FALSE, echo = TRUE, eval = FALSE}
+#  Plot Top important variables 
+
+Model_final$variable.importance
+
+var_imp_ranger<-as.data.frame(Model_final$variable.importance)
+variables <-(as.vector((row.names(var_imp_ranger))))
+var_imp_ranger <- cbind(variables,var_imp_ranger)
+var_imp_ranger <- var_imp_ranger %>% arrange(desc(`Model_final$variable.importance`))
+
+
+ggplot(var_imp_ranger,
+       aes(x = reorder(variables,`Model_final$variable.importance`),
+           y = `Model_final$variable.importance`, 
+           fill = `Model_final$variable.importance`))+ 
+  geom_bar(stat="identity", position="dodge")+ coord_flip()+
+  ylab("Importance")+
+  xlab("")+
+  ggtitle("Variable Importance - Random Forest 500 Trees")+
+  guides(fill = F)+
+  scale_fill_gradient()
+
+
+```
+> The most important variables are **odds**, **elo.diff.fh**, **elo.away.ft** and **diff.probs** 
+
+## Prediction Intervals with Quantile Regression Forests 
+```{r, message = FALSE, warning = FALSE, echo = TRUE, eval = FALSE}
+
+# Quantile Predictions 
+quantiles_reg_forests <- predict(Model_final, data = X_test, type = "quantiles", quantiles = seq(0, 1, by = 0.1))
+
+pred_intervals <- as.data.table(quantiles_reg_forests$predictions)
+
+# Concatenate actual value (profit) and predicted quantiles 
+actual_profit_w_pred_intervals <- data.table(cbind(Y_test, pred_intervals))
+
+names(actual_profit_w_pred_intervals)[2:ncol(actual_profit_w_pred_intervals)] <- c("Q0", "Q10","Q20", "Q30", "Q40", "Q50",
+                                                                                   "Q60", "Q70","Q80", "Q90", "Q100")
+
+actual_profit_w_pred_intervals %>% head(5)
+
+
+```
+
+
+## Decison Rule to place bets 
+
+> **The strategy will be based on quantile predictions**. Given a quantile (eg quantile 10%), the strategy will consider to place only the bets whose the **predicted** quantile 10% values are greater than 0. It implies that there's a 90% chance that the profit is positive. 
+
+> Let's see what would be the profit with this strategy implemented on different quantiles. 
+
+```{r, message = FALSE, warning = FALSE, echo = TRUE, eval = FALSE}
+
+# Function to get the number of bets placed, the proportion of winning bets, the tatal profit for each quantile 
+
+summarise_bets_placed <- function(quantile){
+  
+  tmp <- copy(actual_profit_w_pred_intervals)
+  
+  # Distinguish positive profits from negative profits  
+  tmp  <- tmp[, positive_profit := ifelse(Y_test > 0, 1, 0)]
+  
+  tmp <-  tmp[get(quantile) > 0,
+              .(nb_bets_placed = .N,
+                sum_profit = sum(Y_test)),
+              by = .(positive_profit)]
+  
+  tmp$quantile_considered <- quantile
+  
+  tmp  <- tmp[,
+              c("prop_bets", "sum_profit_quantile") := list(nb_bets_placed/sum(nb_bets_placed), sum(sum_profit)),
+              by= .(quantile_considered)]
+  
+  sdcols <- c("quantile_considered", "positive_profit", "nb_bets_placed", "prop_bets", "sum_profit", "sum_profit_quantile")
+  
+  tmp <- tmp[, .SD, .SDcols = sdcols]
+  
+  return(tmp)
+  
+}
+
+quantiles <- list("Q10", "Q20", "Q30", "Q40", "Q50", "Q60", "Q70", "Q80", "Q90", "Q100")
+
+bets_placed_quantile <- map(quantiles,
+                             summarise_bets_placed)
+
+bets_placed_quantile <- rbindlist(bets_placed_quantile)
+
+bets_placed_quantile
+
+
+
+```
+
+```{r, message = FALSE, warning = FALSE, echo = TRUE, eval = FALSE}
+
+# Give it a try on random sample 
+dim <- 1000
+ind <- sample(1:nrow(X_test), dim)
+X_test_samp <- X_test[ind]
+Y_test_samp <- Y_test[ind]
+sum(Y_test_samp)
+
+# Predict on the test set
+quantiles_reg_forests <- predict(Model_final, data = X_test_samp, type = "quantiles", quantiles = seq(0, 1, by = 0.1))
+
+pred_intervals <- as.data.table(quantiles_reg_forests$predictions)
+
+actual_profit_w_pred_intervals <- data.table(cbind(Y_test_samp, pred_intervals))
+
+names(actual_profit_w_pred_intervals) <- c("Y_test","Q0", "Q10","Q20", "Q30", "Q40", "Q50","Q60", "Q70","Q80", "Q90", "Q100")
+
+quantiles <- list("Q10", "Q20", "Q30", "Q40", "Q50", "Q60", "Q70", "Q80", "Q90", "Q100")
+
+bets_placed_quantile_samp <- map(quantiles,
+                                 summarise_bets_placed)
+
+bets_placed_quantile_samp <- rbindlist(bets_placed_quantile_samp)
+
+bets_placed_quantile_samp
+
+# Worst case - we only keep bets with negative profit  
+
+ind <- which(Y_test < 0)
+X_test_wc <-  X_test[ind]
+Y_test_wc <- Y_test[ind]
+# Predict on the test set
+quantiles_reg_forests <- predict(Model_final, data = X_test_wc, type = "quantiles", quantiles = seq(0, 1, by = 0.1))
+
+pred_intervals <- as.data.table(quantiles_reg_forests$predictions)
+
+actual_profit_w_pred_intervals <- data.table(cbind(Y_test_wc, pred_intervals))
+
+names(actual_profit_w_pred_intervals) <- c("Y_test","Q0", "Q10","Q20", "Q30", "Q40", "Q50","Q60", "Q70","Q80", "Q90", "Q100")
+
+quantiles <- list("Q10", "Q20", "Q30", "Q40", "Q50", "Q60", "Q70", "Q80", "Q90", "Q100")
+
+bets_placed_quantile_samp <- map(quantiles,
+                                 summarise_bets_placed)
+
+bets_placed_quantile_samp <- rbindlist(bets_placed_quantile_samp)
+
+bets_placed_quantile_samp
 
 ```
 

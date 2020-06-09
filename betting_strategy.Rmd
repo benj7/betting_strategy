@@ -880,3 +880,5 @@ bets_placed_quantile_wc
 > In this worst case, bets are only placed from the **quantile 30%-based Decision Rule**. Thus, a risk-averse gambler won't play and then won't lose money.
 <br><br>
 Our strategy can therefore be used to mitigate risk and avoid significant financial losses. 
+
+

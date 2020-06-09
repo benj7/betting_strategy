@@ -24,7 +24,7 @@ opacity: 1;
 </style>
 
 
-> Challenge presentation : The main goal is to formulate an over/under betting strategy based on the data. To do so, we will predict the profit using a machine learning approach. We will use these predictions 
+> Challenge presentation : The main goal is to formulate an over/under betting strategy based on the football_example csv file. To do so, we will predict the profit using a machine learning approach. We determine Prediction Intervals with Quantile Regression Forests (Random Forests) and use them to formulate our strategy. 
 
 > **METHODOLOGY** ------- 
 <br><br>
@@ -43,19 +43,17 @@ opacity: 1;
 <br> Comparison of different algorithms (OLS, Ridge, Lasso, ... Random Forest, XGBoost) by tuning the hyper-parameters in the cross validation.
 <br><br>
 7. **Identify the best strategy** by analyzing the cross validation errors for each model. 
-<br> This step enables us to see if there are non linear effects. In such a case, we can try models with interaction terms.
-<br> Interaction models increase a lot the number of features (Beware of the curse of dimensionality!).
 <br><br>
-8. We can perform **Principal Components Analysis** (PCA) to reduce the dimensionality of the data set with interaction terms (to reduce the number of variables and avoid multicollinearity).
+8. **Retrain** the best model (i.e model with best hyper-parameters from cross validation) **on the full training set** & **assess performance on the testing set**.
+<br> In the following code, we'll tune some hyper-parameters in the cross validation but without seeking for the optimal combination (grid search).
 <br><br>
-9. **Retrain** the best model (i.e model with optimal hyper-parameters from cross validation) **on the full training set** & **assess performance on the testing set**.
-<br> In the following code, we'll tune some hyper-parameters in the cross validation but without seeking for the optimal combination (grid search) for lack of time.
+9. **Formulate a over/under betting strategy** based on quantile predictions from Random Forest. Check the **performance and the robustness of the strategy**
 
 
 ***
 **LOAD PACKAGES**
 
-```{r setup, message = FALSE, warning = FALSE, echo = TRUE, eval = FALSE}
+```{r setup, message = FALSE, warning = FALSE, echo = TRUE, eval = TRUE}
 
 # Disable scientific notation 
 options(scipen=999)
@@ -66,7 +64,6 @@ options(scipen=999)
 library(tidyverse)
 library(data.table)
 library(broom)
-library(readr)
 
 # String manipulation
 library(stringr)
@@ -120,11 +117,10 @@ library(tictoc)
 
 
 ***
-# DATA EXPLORATION
-```{r, message = FALSE, warning = FALSE, echo = TRUE, eval = FALSE}
+# EXPLORATION DATA ANALYSIS
+```{r, message = FALSE, warning = FALSE, echo = TRUE, eval = TRUE}
 # # Exploring data 
-# summarize_train <- mlr::summarizeColumns(train)
-# summarize_test <- mlr::summarizeColumns(test)
+# summarize_df<- mlr::summarizeColumns(df)
 
 # there are some algorithms which don’t require you to impute missing values
 # You can simply supply them missing data. They take care of missing values on their own
@@ -144,28 +140,27 @@ df <- fread(link_github)
 # back up data initial 
 df_backup <- df
 
-# Rename modalities of the variable selection 
-df <- df %>% mutate(selection = case_when(selection == "home" ~ "over",
-                                          selection == "away" ~ "under"))
-
 ```
 
 ## Descriptive Statistics
 
-```{r, message = FALSE, warning = FALSE, echo = TRUE, eval = FALSE}
+```{r, message = FALSE, warning = FALSE, echo = TRUE, eval = TRUE}
 
 # Descriptive stats 
 skim(df)
 
 ```
 
-> The mean of the profit is negative: -0.0443.
+<br><br>
 
-> The variable "home_score" and "away_score" which are the score at the 15th minute for home and away teams are always equal to O. This variable is not reliable enough to be used for modelling. 
+> It's very interesting to notice that the profit mean is negative: -0.0443. **If we decide to place all bets, the overall profit is negative, equals to -1721.**
+
+> The variable "home_score" and "away_score" which are the score at the 15th minute for home and away teams are always equal to 0. This variable is not reliable enough to be used for modelling. 
 
 
 ## Response Variable Distribution
-```{r, message = FALSE, warning = FALSE, echo = TRUE, eval = FALSE}
+
+```{r, message = FALSE, warning = FALSE, echo = TRUE, eval = TRUE}
 
 plot_ly(data = df, 
         x = ~profit,
@@ -177,49 +172,64 @@ plot_ly(data = df,
          yaxis = list(title = "Frequency",
                       zeroline = FALSE))
 
-# The response variable is skewed - we can't consider log transformation since the target could be negative 
 
 ```
 
-> Around 54% of the bets have a profit negative or equals to 0. 
+<br>
+> **Around 54% of the bets have a profit negative or equals to 0.**
+<br> 
+The response variable is skewed but we can't consider log transformation since the target can be negative 
 
-# EXPLORATORY DATA ANALYSIS 
 
-> Which features are most likely to provide business insights and lend well to a machine learning model?
+# CORRELATION ANALYSIS 
+
+> Correlation Analysis on data that has been preprocessed to identify key features that relate to the target
 
 ```{r, message = FALSE, warning = FALSE, echo = TRUE, eval = TRUE}
 
 # Feature Engineering ----
 
-df <- df %>% 
+df <- df %>% mutate(
   
-  mutate(# Add difference between elo_home and elo_away
-    elo_diff_ft = elo_home_ft - elo_away_ft,
-    
-    elo_diff_fh = elo_home_fh - elo_away_fh,
-    
-    # Add difference between league_prod_at_least and implied probability from odds 
-    diff_probs = league_prob_at_least - 1/(odds+1),
-    
-    # Total number of goals
-    nb_goals = final_home_score + final_away_score,
-    
-    # Is profit positive? 1: Yes - 0:No
-    positive_profit = if_else(profit > 0, 1, 0),
-    
-    # Ratio between profit and odds 
-    profit_odd_ratio = profit/odds)
+  # Rename modalities of the variable "selection"
+  selection = case_when(selection == "home" ~ "over",
+                        selection == "away" ~ "under"),
+  
+  # Compute difference between elo_home and elo_away
+  elo_diff_ft = elo_home_ft - elo_away_ft,
+  
+  elo_diff_fh = elo_home_fh - elo_away_fh,
+  
+  # Compute difference between league_prod_at_least and implied probability from odds 
+  diff_probs = league_prob_at_least - 1/(odds+1),
+  
+  # Total number of goals
+  nb_goals = final_home_score + final_away_score,
+  
+  # Is profit positive? 1: Yes - 0:No
+  positive_profit = if_else(profit > 0, 1, 0),
+  
+  # Ratio between profit and odds 
+  profit_odd_ratio = profit/odds)
 
 df <- as.data.table(df)
 
 df <- df[profit < 0, profit_odd_ratio := profit]
 
-df$profit_odd_ratio <- round(df$profit_odd_ratio, 2)
+# Round numeric variables to 3 decimal
+col_num <- which(sapply(df,class) == "numeric")
+
+sdcols <- names(df)[col_num]
+  
+df_num <- df[, lapply(.SD, function(x) round(x,3)), .SDcols = sdcols]
+
+df_no_num <- df[, .SD, .SDcols = setdiff(names(df), sdcols)]
+
+df <- cbind(df_no_num, df_num)
 
 # Correlation Analysis - Identify key features that relate to the target ("profit")
 
 # Transform the data into a binary format 
-
 df_binarized <- df %>%
   # remove useless variables with no information or variables that we don't know before betting 
   select(-c(market_id, 
@@ -249,7 +259,14 @@ df_binarized_corrl <- df_binarized %>%
 df_binarized_corrl %>%
   plot_correlation_funnel()
 
-# Remove useless variables (without any useful information for modelling)
+```
+
+
+> Low odds are logically more correlated with a positive profit.  According to this analysis, the "diff_probs" feature seems to be correlated with the profit - this is interesting for modelling purposes! 
+
+```{r, message = FALSE, warning = FALSE, echo = TRUE, eval = TRUE}
+
+# Remove useless variables with no information or variables that we don't know before betting 
 df <- as.data.table(df)
 
 features_to_keep <- setdiff(names(df),c("market_id",
@@ -280,7 +297,7 @@ df_model_hot <- predict(one_hot, df_model) %>% as.data.frame()
 # MODELING
 ## Data Splitting 
 
-```{r, message = FALSE, warning = FALSE, echo = TRUE, eval = FALSE}
+```{r, message = FALSE, warning = FALSE, echo = TRUE, eval = TRUE}
 
 # Response variable renaming  
 df_model_hot <- df_model_hot %>%
@@ -289,28 +306,24 @@ df_model_hot <- df_model_hot %>%
 # Separate into random training and test data sets ----
 
 # set.seed() for reproducibility 
-set.seed(42) 
+set.seed(123) 
 
 # We keep 80% of the data for model training 
-split_strat<- initial_split(df_model_hot, prop = 0.8)
+split_strat <- initial_split(df_model_hot, prop = 0.8)
 df_train  <- training(split_strat)
 df_test   <- testing(split_strat)
 
-# Split on backup data 
-set.seed(42)
-split_strat_backup <- initial_split(df_backup, prop = 0.8)
-df_train_backup  <- training(split_strat_backup)
-df_test_backup   <- testing(split_strat_backup)
-
-# df_model_hot <- as.data.table(df_model_hot)
-# indices1 <- 1:floor(nrow(df_model_hot)*0.8)
-# indices2 <- (floor(nrow(df_model_hot)*0.8)+1):nrow(df_model_hot)
-# df_train <- df_model_hot[indices1]
-# df_test <- df_model_hot[indices2]
 ```
 
+br><br>
+> We implement a 5-fold cross validation manually (for loop)
+<br>
+This gives us a lot of flexibility and provides a good understanding of what goes on behind the scenes.
+<br> 
+For large-scale machine learning projects, I use H2O which automates the cross validation and hyperparameter tuning process. It's much faster and more scalable since H2O is written in Java. 
+
 ## 5-fold Cross validation implementation on the training set
-```{r, message = FALSE, warning = FALSE, echo = TRUE, eval = FALSE}
+```{r, message = FALSE, warning = FALSE, echo = TRUE, eval = TRUE}
 # Training set 
 X <- as.data.table(df_train %>% select(-Y))
 Y <- df_train$Y
@@ -328,15 +341,11 @@ names(XY_test)[1] <- "Y"
 # Cross validation 
 # Higher CV metrics determine that our model does not suffer from high variance and generalizes well on unseen data
 
-# We implement a 5-fold cross validation manually(for loop)
-# This gives us a lot of flexibility & provides a good understanding of what goes on behind the scenes.
-# For large-scale machine learning projects, I use H2O which automates the cross validation and hyperparameter tuning process. It's much faster and more scalable since H2O is written in Java. 
-
 # Number of folds
 N <- 5
 
 # Folds building
-set.seed(42)
+set.seed(123)
 Folds <- sample(1:dim(XY)[1] %% N + 1)
 
 Output <- list()
@@ -502,13 +511,14 @@ for(i in 1:N){
                      eta = 0.1, # learning rate 0.3 by default
                      max_depth = 4, #  Maximum depth of a tree. 6 by default
                      objective = "reg:linear",
-                     print_every = 10)
+                     print_every = 1000) # hide results 
     Response <- predict(Model , XMP, missing = NA)
     Predictions[[Nom]] <- as.numeric(Response)
     Time[[Nom]] <- ifelse(is.null(Time[[Nom]]), 0, Time[[Nom]]) + (proc.time() - Start)[3]
   }
   
   # #********************* SVM *****************************#
+  # NOT RUN 
   # tune Kernel and Cost hyper-parameters in the cross validation 
   # Kernels <- c("linear", "polynomial", "radial")
   # Costs <- c(0.1, 1, 2)
@@ -534,7 +544,7 @@ for(i in 1:N){
 
 
 ## Assess cross validation errors 
-```{r, message = FALSE, warning = FALSE, echo = TRUE, eval = FALSE}
+```{r, message = FALSE, warning = FALSE, echo = TRUE, eval = TRUE}
 # Stack all the outputs tables up 
 
 Output <- data.table::rbindlist(l = Output, use.names = TRUE, fill = TRUE)
@@ -554,12 +564,12 @@ Errors <- merge(x = Errors, y = Time, by = "Model", all.x = TRUE, all.y = FALSE)
 Errors <- Errors[order(error_rate)]
 Errors
 
-# XGBoost and RandomForest models performing better than the OLS model.
 ```
+> By analyzing the cross validation errors, the best model is Random Forest 250 trees. Let's retrain on the full training set and predict on the testing set! 
 
 # PREDICT ON TEST SET   
 ## Retrain on the full training set 
-```{r, message = FALSE, warning = FALSE, echo = TRUE, eval = FALSE}
+```{r, message = FALSE, warning = FALSE, echo = TRUE, eval = TRUE}
 # Training set 
 X <- as.data.table(df_train %>% select(-Y))
 Y <- df_train$Y
@@ -574,17 +584,17 @@ Y_test <- df_test$Y
 XY_test <- cbind(Y_test, X_test)
 names(XY_test)[1] <- "Y"
 
-# Retrain on the full training set so without cross validation this time
-# According to the cross validation, the best model is Random Forest with 500 trees
-
+# make ranger compatible names
 names(XY) <- make.names(names(XY), allow = FALSE)
 names(X_test) <- make.names(names(X_test), allow = FALSE)
+
 features <- setdiff(names(XY), "Y")
 
-# Fit sur l'ensemble de la base train 
+# Best Model: Random Forest 250 trees according to the the cross validation errors 
+
 Model_final<- ranger(formula    = Y ~ .,
                      data       = XY,
-                     num.trees  = 500, # nombre d'arbres 
+                     num.trees  = 250, # nombre d'arbres 
                      mtry       = floor(length(features) / 3), # nombre de variables tirés au hasard - valeur usuelle pour regression = p/3 avec p nombre de variables 
                      respect.unordered.factors = 'order',
                      # To plot variable imortance 
@@ -597,7 +607,7 @@ Model_final<- ranger(formula    = Y ~ .,
 ```
 
 ## Assess performance on the test set
-```{r, message = FALSE, warning = FALSE, echo = TRUE, eval = FALSE}
+```{r, message = FALSE, warning = FALSE, echo = TRUE, eval = TRUE}
 
 # Predict on the test set
 predictions_testRF <- predict(Model_final, data = X_test, type = "response")
@@ -607,13 +617,11 @@ predictions_test <- data.frame(cbind(Y_test, predictions_testRF$predictions))
 loss_function(X = predictions_testRF$predictions, Y = Y_test)
 
 ```
-> The mean Absolute Error equals to 0.55 on the test set 
+> The Mean Absolute Error equals to 0.58 on the test set. Let's determine the main discriminant variables by plotting the variable importance. 
 
 ## Variable Importance
-```{r, message = FALSE, warning = FALSE, echo = TRUE, eval = FALSE}
+```{r, message = FALSE, warning = FALSE, echo = TRUE, eval = TRUE}
 #  Plot Top important variables 
-
-Model_final$variable.importance
 
 var_imp_ranger<-as.data.frame(Model_final$variable.importance)
 variables <-(as.vector((row.names(var_imp_ranger))))
@@ -621,50 +629,56 @@ var_imp_ranger <- cbind(variables,var_imp_ranger)
 var_imp_ranger <- var_imp_ranger %>% arrange(desc(`Model_final$variable.importance`))
 
 
-ggplot(var_imp_ranger,
-       aes(x = reorder(variables,`Model_final$variable.importance`),
+p <- ggplot(var_imp_ranger,
+       aes(x = reorder(variables,`Model_final$variable.importance`) ,
            y = `Model_final$variable.importance`, 
            fill = `Model_final$variable.importance`))+ 
-  geom_bar(stat="identity", position="dodge")+ coord_flip()+
+  geom_bar(stat="identity", position="dodge", aes(text = `Model_final$variable.importance`))+
+  coord_flip()+
   ylab("Importance")+
   xlab("")+
   ggtitle("Variable Importance - Random Forest 500 Trees")+
   guides(fill = F)+
-  scale_fill_gradient()
+  scale_fill_gradient()+
+  theme_classic()
 
+ggplotly(p, tooltip = "text")
 
 ```
-> The most important variables are **odds**, **elo.diff.fh**, **elo.away.ft** and **diff.probs** 
+> The most important variables are **odds**, **elo.diff.fh**, **elo.away.ft** and **diff.probs**. Our feature engineering has therefore increased the model performance! 
 
+> More important than the average values given by the random forests, we want to analyze the quantile predictions to get prediction intervals. We will use them to determine a betting strategy thereafter. 
+
+# OVER-UNDER BETTING STRATEGY 
 ## Prediction Intervals with Quantile Regression Forests 
-```{r, message = FALSE, warning = FALSE, echo = TRUE, eval = FALSE}
+```{r, message = FALSE, warning = FALSE, echo = TRUE, eval = TRUE}
 
 # Quantile Predictions 
 quantiles_reg_forests <- predict(Model_final, data = X_test, type = "quantiles", quantiles = seq(0, 1, by = 0.1))
 
 pred_intervals <- as.data.table(quantiles_reg_forests$predictions)
 
-# Concatenate actual value (profit) and predicted quantiles 
+# Concatenate actual value (profit) and quantile predictions 
 actual_profit_w_pred_intervals <- data.table(cbind(Y_test, pred_intervals))
 
 names(actual_profit_w_pred_intervals)[2:ncol(actual_profit_w_pred_intervals)] <- c("Q0", "Q10","Q20", "Q30", "Q40", "Q50",
                                                                                    "Q60", "Q70","Q80", "Q90", "Q100")
 
+# Display the five first rows 
 actual_profit_w_pred_intervals %>% head(5)
 
 
 ```
-
+<br>
+> The Y_test value is the real profit of the bet. The other variables are the different **quantile predictions** (deciles in our case) with the Random Forest Model. They give us an idea about the prediction intervals. 
 
 ## Decison Rule to place bets 
 
-> **The strategy will be based on quantile predictions**. Given a quantile (eg quantile 10%), the strategy will consider to place only the bets whose the **predicted** quantile 10% values are greater than 0. It implies that there's a 90% chance that the profit is positive. 
+> **Our betting strategy will be based on quantile predictions**. Given a quantile (eg quantile 10%), the strategy will consider placing only bets where the **predicted quantile 10% values are greater than 0**. It implies that there's a probability of 90% (quantile 10%) that the profit is positive. 
 
-> Let's see what would be the profit with this strategy implemented on different quantiles. 
+```{r, message = FALSE, warning = FALSE, echo = TRUE, eval = TRUE}
 
-```{r, message = FALSE, warning = FALSE, echo = TRUE, eval = FALSE}
-
-# Function to get the number of bets placed, the proportion of winning bets, the tatal profit for each quantile 
+# Function to get the number of bets placed, the proportion of winning/loosing bets, the overall profit for each quantile 
 
 summarise_bets_placed <- function(quantile){
   
@@ -678,13 +692,13 @@ summarise_bets_placed <- function(quantile){
                 sum_profit = sum(Y_test)),
               by = .(positive_profit)]
   
-  tmp$quantile_considered <- quantile
+  tmp$decision_rule_quantile <- quantile
   
   tmp  <- tmp[,
               c("prop_bets", "sum_profit_quantile") := list(nb_bets_placed/sum(nb_bets_placed), sum(sum_profit)),
-              by= .(quantile_considered)]
+              by= .(decision_rule_quantile)]
   
-  sdcols <- c("quantile_considered", "positive_profit", "nb_bets_placed", "prop_bets", "sum_profit", "sum_profit_quantile")
+  sdcols <- c("decision_rule_quantile", "positive_profit", "nb_bets_placed", "prop_bets", "sum_profit", "sum_profit_quantile")
   
   tmp <- tmp[, .SD, .SDcols = sdcols]
   
@@ -702,14 +716,36 @@ bets_placed_quantile <- rbindlist(bets_placed_quantile)
 bets_placed_quantile
 
 
-
 ```
 
-```{r, message = FALSE, warning = FALSE, echo = TRUE, eval = FALSE}
+> This table give us the number of bets to be placed, the proportion of winning/loosing bets and the overall profit for each quantile-based decision rule.  
 
-# Give it a try on random sample 
-dim <- 1000
-ind <- sample(1:nrow(X_test), dim)
+> **Interpretation** 
+<br> 
+*Example_1* : Our strategy is to bet over only if Quantile 10% > 0. Only 125 bets will be placed. They are all winning bets with an overall profit of 38.4
+<br>
+*Example_2* : Our strategy is to bet over only if Quantile 60% > 0. 3, 305 bets will be placed. 2,899 bets are winning and 406 loosing. But the overall profit (1895.4) is higher than in *Example_1* 
+<br>
+*Example_3* : Our strategy is to bet over if Quantile 100% > 0. Thus, all the bets will be placed. There is no selection! 7,761 bets with 3,558 winning bets and 4,203 loosing bets. The overall profit is negative: -350.4 
+
+<br>
+> According to his risk aversion, the gambler can choose between: 
+<br> 
+1. Mitigate the risk by placing very few bets and securing the profits - Decision Rule:  Quantile 10% > 0
+<br>
+2. Try to optimize the overall profit - Decsion Rule:  Quantile 50% > 0 or Quantile 60%  > 0. In such a case, there will be loosing bets but the overall profit seems to be higher. 
+
+> Let's apply our strategy on another random sample from test set to check the **robustness of the strategy**
+
+##Strategy Robustness
+
+```{r, message = FALSE, warning = FALSE, echo = TRUE, eval = TRUE}
+
+# Random sample from test set
+set.seed(42) # for reproducibility 
+
+size <- 2500
+ind <- sample(1:nrow(X_test), size)
 X_test_samp <- X_test[ind]
 Y_test_samp <- Y_test[ind]
 sum(Y_test_samp)
@@ -732,12 +768,24 @@ bets_placed_quantile_samp <- rbindlist(bets_placed_quantile_samp)
 
 bets_placed_quantile_samp
 
-# Worst case - we only keep bets with negative profit  
+```
 
+> If our strategy is to bet over if Quantile 10% > 0: there are 43 bets placed (over 2,500 possible bets) and we win 13.08
+<br> Here again, the best strategy seems to bet over Quantile > 60%. 1325 bets placed:  1049 winning and 276 loossing bets. The overall profit is 612.2 
+
+> Out of intellectual curiosity, let's consider the worst case scenario: we only keep bets with negative profit 
+<br> What would be the results of our strategy based on quantiles? 
+
+##Worst Case Scenario 
+
+```{r, message = FALSE, warning = FALSE, echo = TRUE, eval = TRUE}
+
+# Worst Case Scenario - we only keep bets with negative profit  
 ind <- which(Y_test < 0)
 X_test_wc <-  X_test[ind]
 Y_test_wc <- Y_test[ind]
-# Predict on the test set
+
+# Quuntile Predictions with Random Forest  
 quantiles_reg_forests <- predict(Model_final, data = X_test_wc, type = "quantiles", quantiles = seq(0, 1, by = 0.1))
 
 pred_intervals <- as.data.table(quantiles_reg_forests$predictions)
@@ -757,3 +805,4 @@ bets_placed_quantile_samp
 
 ```
 
+> Even in this worst case scenario, a risk-averse gambler who only bet over if Quantile 10% > 0 will loose very little money since there is only 1 bet placed. Thus, our strategy can be used to mitigate the risk and to avoid significant financial losses. 

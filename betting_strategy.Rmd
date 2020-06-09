@@ -51,7 +51,6 @@ The main goal is to formulate an over/under betting strategy based on the footba
 <br><br>
 9. **Formulate a over/under betting strategy** based on Quantile Prediction with Random Forest. Check the **performance and the robustness of the strategy**
 
-
 ***
 **LOAD PACKAGES**
 

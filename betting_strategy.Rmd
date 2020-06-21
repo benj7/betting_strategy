@@ -1,7 +1,7 @@
 ---
 title: "Over/Under Betting Strategy"
 author: "by [Benjamin DAVID]()"
-mail: benjamin7david@gmail.com
+mail: 
 output:
   epuRate::epurate:
     code_folding: show
